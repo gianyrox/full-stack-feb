@@ -133,7 +133,7 @@ Each bead is a self-contained, testable unit. Beads can run in parallel where de
 - **Store confidence + extraction_logic as metadata** for pipeline observability
 - Full implementation in `research/2gemini.md` Part B
 
-### B6: LLM Structuring Pipeline — READY TO IMPLEMENT (upgraded with ALL research)
+### B6: LLM Structuring Pipeline — DONE (implemented in `backend/structurer.py`)
 - **Depends**: B5.5, B7
 - **API**: OpenAI GPT-4o with `response_format={"type": "json_object"}` (JSON Mode)
   - **NOT Structured Outputs** — Gemini confirmed OpenAI rejects recursive Pydantic models
@@ -203,9 +203,11 @@ Each bead is a self-contained, testable unit. Beads can run in parallel where de
 **Phase 1 — COMPLETE:**
 B1, B4, B7, B8, B9, B10 all done and upgraded with research
 
-**Phase 2 — NEXT (all research complete, ready to implement):**
-B2 (Discovery) → B3 (Resolver + Downloader) → B5 (Text Extractor) → B5.5 (Section Extractor) → B6 (LLM Pipeline)
-- Also: Enhance B7 validator with Gemini DFS traversal checks
+**Phase 2 — COMPLETE:**
+B2 (Discovery) + B3 (Resolver + Downloader) in `backend/scraper.py`
+B5 (Text Extractor) + B5.5 (Section Extractor) in `backend/extractor.py`
+B6 (LLM Pipeline) in `backend/structurer.py`
+API endpoints: `POST /api/run-scraper`, `POST /api/run-structurer`
 
-**Phase 3 — FINAL:**
-Integration test, README updates, commit
+**Phase 3 — IN PROGRESS:**
+Run full pipeline, integration test, README updates, commit
