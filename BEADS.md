@@ -7,6 +7,8 @@ Each bead is a self-contained, testable unit. Beads can run in parallel where de
 ```
 [B1: Scaffold] ──┬──→ [B2: Discovery] ──→ [B3: PDF Resolver + Downloader] ──→ [B5: Text Extractor]
                  │                                                                     │
+                 │                                                            [B5.5: Section Extractor]
+                 │                                                                     │
                  │                                                             [B6: LLM Pipeline]
                  │                                                                     │
                  │                                                             [B7: Validator]
@@ -29,10 +31,17 @@ Each bead is a self-contained, testable unit. Beads can run in parallel where de
 - UPSERT patterns: `ON CONFLICT(pdf_url) DO UPDATE` for policies, `ON CONFLICT(policy_id) DO UPDATE` for structured_policies
 - Auto-migration on FastAPI startup via `backend/migrate.py`
 
-### B7: JSON Schema Validator — DONE
+### B7: JSON Schema Validator — DONE (enhance with Gemini insights)
 - Pydantic recursive models (RuleNode, StructuredPolicy)
 - Validates operator+rules consistency (both present or both absent)
 - `validate_structured_json(data) → (bool, Optional[str])`
+- **Gemini enhancements to add**:
+  - DFS tree traversal: unique rule_id check, hierarchy prefix validation (child starts with parent prefix)
+  - Sequential child ID check (1.1, 1.2, 1.3 not 1.1, 1.3)
+  - Empty rule_text detection
+  - Depth > 5 warning (possible hallucination)
+  - Operator consistency check ("all of the following" → AND, "one of the following" → OR)
+  - See `research/2gemini.md` Part D for full implementation
 
 ### B8: API Server — DONE (upgraded with research)
 - 4 endpoints with raw SQL queries:
@@ -97,36 +106,59 @@ Each bead is a self-contained, testable unit. Beads can run in parallel where de
 - **Rate limiting**: 0.5s delay between requests, 3 retries with exponential backoff
 - **Session**: reuse `requests.Session()` with browser-like headers for connection pooling
 
-### B5: PDF Text Extractor — READY TO IMPLEMENT
+### B5: PDF Text Extractor — READY TO IMPLEMENT (upgraded with Gemini research)
 - **Depends**: B3
-- Use pdfplumber (layout-aware text extraction, table support) or PyMuPDF (fitz) for speed
-- Handle multi-page, preserve numbered list hierarchy
+- **DECISION: Use PyMuPDF (fitz)** — Gemini's comparative analysis is definitive:
+  - Flawless Unicode (≥, ≤, ™) — critical for medical thresholds like "BMI ≥ 40"
+  - Fastest: < 100ms for 10 pages vs pdfplumber ~1-2s
+  - `sort=True` enforces natural reading order, preserving list hierarchy
+  - C-based MuPDF engine, superior memory efficiency
+- Implementation: `page.get_text("text", sort=True)` per page, join with newlines
+- Handle multi-page, preserve numbered list hierarchy (1, a, i)
 - Strip headers/footers
-- **Grok insight**: pdfplumber superior for structured text; PyMuPDF faster for simple extraction
+- **Grok suggested pdfplumber** but Gemini's analysis shows PyMuPDF better for hierarchical text (pdfplumber better for tables/financial docs)
 
-### B6: LLM Structuring Pipeline — READY TO IMPLEMENT (upgraded with all research)
-- **Depends**: B5, B7
-- OpenAI GPT-4o with `response_format={"type": "json_object"}`
-- System prompt: "You are a medical criteria structurer"
-- User prompt: Feed extracted text, request ONLY initial criteria as recursive JSON tree
-- **Initial-only heuristic** (from ChatGPT + Grok research):
-  - Heading patterns in PDFs:
-    - `"Medical Necessity Criteria for Initial Authorization"`
-    - `"Medical Necessity Criteria for Reauthorization"` (EXCLUDE)
-    - `"Clinical Indications"` → first criteria set = initial
-    - `"Continued Care"` / `"Continuation of Services"` (EXCLUDE)
-  - Regex: `r'(?:Initial|Medical Necessity Criteria for Initial)\s*(Authorization|Approval|Criteria)'`
-  - Strategy: Slice text to initial section, exclude reauth/continuation blocks
-  - Fallback: first complete criteria tree if initial/reauth not explicitly labeled
-- **Criteria formatting in PDFs** (from ChatGPT research):
-  - Numbered lists (1., 2.) with AND/OR logic explicit per line
-  - Nested subcriteria: lettered (a., b.) and roman (i., ii.)
-  - Bullets: ●, ○, ❖ for drug lists
-  - Some policies have multiple indication-specific criteria blocks
+### B5.5: Initial-Only Section Extractor — NEW (from Gemini research)
+- **Depends**: B5
+- **Purpose**: Pre-slice PDF text to only the initial criteria BEFORE sending to LLM
+- **Implementation**: `extract_initial_criteria(full_text) → (text, confidence, logic_log)`
+- **State machine approach** (line-by-line scanning, NOT multi-line regex):
+  - START_PATTERNS: `criteria for medically necessary`, `initial (criteria|authorization|approval)`, `medical necessity criteria`, `conditions for coverage`
+  - END_PATTERNS: `continuation`, `re-authorization`, `renewal`, `repair/revision`, `experimental/investigational`, `applicable billing codes`, `HCPCS & CPT`
+  - Fallback: uppercase headers like "BACKGROUND" or "SUMMARY" as section breaks
+- **Confidence scoring**:
+  - 0.95 = explicit "Initial" keyword found
+  - 0.85 = generic "Criteria for Medically Necessary" found (e.g., CG008 Bariatric)
+  - 0.30 = no boundary found, full text passed to LLM (flags for human review)
+- **Store confidence + extraction_logic as metadata** for pipeline observability
+- Full implementation in `research/2gemini.md` Part B
+
+### B6: LLM Structuring Pipeline — READY TO IMPLEMENT (upgraded with ALL research)
+- **Depends**: B5.5, B7
+- **API**: OpenAI GPT-4o with `response_format={"type": "json_object"}` (JSON Mode)
+  - **NOT Structured Outputs** — Gemini confirmed OpenAI rejects recursive Pydantic models
+  - `temperature=0.1` for deterministic analytical mapping
+  - `max_tokens=4096`
+- **System prompt**: Full medical policy analyst prompt from Gemini (see `research/2gemini.md` Part A)
+  - Covers: section identification, hierarchical rule_id generation (dotted notation), leaf vs non-leaf rules, AND/OR detection (explicit triggers, inline connectors, implicit convention), edge cases (cross-refs, inline exceptions, notes)
+- **User prompt**: Injects extracted text in `<EXTRACTED_TEXT>` tags with 6-point instruction checklist
+- **Initial-only heuristic** (combined from all research):
+  - Pre-extraction via B5.5 (regex state machine with confidence scoring)
+  - LLM prompt also instructs to stop at continuation/repair/billing boundaries
+  - Double protection: regex + prompt
+- **Semantic retry logic** (from Gemini):
+  - Up to 3 attempts per PDF
+  - On validation failure, feed error message back to LLM in next attempt
+  - If wrong section detected, append "CRITICAL ERROR: You extracted Continuation criteria"
+- **JSON repair** (from Gemini): Use `fast-json-repair` library for malformed LLM output
+  - Strip markdown fencing, repair missing brackets/commas
+  - Validate repaired JSON with B7
+- **Post-processing**: `clean_leaf_nodes()` — remove hallucinated operators from leaf nodes
+- **Batch processing**: `asyncio.gather` for concurrent PDF processing
+- **Cost**: ~$0.018/PDF, ~$0.28 for 15 PDFs
 - Process at least 10 guidelines
 - Validate with B7 (Pydantic) before storing
-- Store: extracted_text ref, structured_json, llm_metadata (model + prompt version), validation_error
-- Chunk large texts if exceeding token limit; retry with refined prompt on schema failure
+- Store: extracted_text ref, structured_json, llm_metadata (model + prompt version), validation_error, confidence_score
 
 ## Research Findings Applied
 
@@ -153,13 +185,27 @@ Each bead is a self-contained, testable unit. Beads can run in parallel where de
 - LLM prompt template for structuring
 - Pydantic for validation (instead of jsonschema)
 
+### Gemini Research (`research/2gemini.md`) — NEW
+**Production-grade pipeline blueprint with code. Key contributions:**
+1. **System prompt**: Full medical policy analyst prompt with exhaustive edge case handling (Part A)
+2. **PDF extraction**: PyMuPDF (fitz) > pdfplumber for clinical guidelines — Unicode, speed, sort=True (Part C)
+3. **Section extraction**: State machine with regex START/END patterns + confidence scoring (Part B)
+4. **JSON repair**: `fast-json-repair` library for malformed LLM output (Part D)
+5. **Tree validation**: DFS traversal with hierarchy prefix, uniqueness, depth, sequential checks (Part D)
+6. **OpenAI integration**: JSON Mode (NOT Structured Outputs — recursive schemas rejected), temperature=0.1 (Part E)
+7. **Semantic retry**: Feed validation errors back to LLM for self-correction, up to 3 attempts (Part E)
+8. **Async batch processing**: `asyncio.gather` for concurrent PDF processing (Part E)
+9. **Cost estimate**: ~$0.018/PDF, ~$0.28 for batch of 15 (Part E)
+10. **New bead B5.5**: Initial-only section extractor (pre-LLM regex slicing)
+
 ## Execution Plan
 
 **Phase 1 — COMPLETE:**
 B1, B4, B7, B8, B9, B10 all done and upgraded with research
 
 **Phase 2 — NEXT (all research complete, ready to implement):**
-B2 (Discovery) → B3 (Resolver + Downloader) → B5 (Extractor) → B6 (LLM Pipeline)
+B2 (Discovery) → B3 (Resolver + Downloader) → B5 (Text Extractor) → B5.5 (Section Extractor) → B6 (LLM Pipeline)
+- Also: Enhance B7 validator with Gemini DFS traversal checks
 
 **Phase 3 — FINAL:**
 Integration test, README updates, commit
