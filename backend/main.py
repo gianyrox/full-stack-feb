@@ -79,7 +79,10 @@ class StatsResponse(BaseModel):
     total_failed: int
     total_structured: int
 
+from backend.admin import router as admin_router
+
 app = FastAPI(title="Medical Policy Explorer API", version="1.0.0")
+app.include_router(admin_router)
 
 allow_origins = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
 app.add_middleware(

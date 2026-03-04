@@ -7,3 +7,6 @@ openai
 PyMuPDF
 httpx
 jsonschema
+requests
+beautifulsoup4
+pdfplumber

@@ -1,4 +1,5 @@
 import { Outlet } from "react-router-dom";
+import AdminChat from "./AdminChat";
 
 export function Layout() {
   return (
@@ -12,6 +13,7 @@ export function Layout() {
       <main className="mx-auto max-w-6xl px-4 py-6">
         <Outlet />
       </main>
+      <AdminChat />
     </div>
   );
 }
