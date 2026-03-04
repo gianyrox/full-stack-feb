@@ -5,11 +5,11 @@ Each bead is a self-contained, testable unit. Beads can run in parallel where de
 ## Dependency Graph
 
 ```
-[B1: Scaffold] ──┬──→ [B2: Discovery] ──→ [B3: Downloader] ──→ [B5: Text Extractor]
-                 │                                                      │
-                 │                                              [B6: LLM Pipeline]
-                 │                                                      │
-                 │                                              [B7: Validator]
+[B1: Scaffold] ──┬──→ [B2: Discovery] ──→ [B3: PDF Resolver + Downloader] ──→ [B5: Text Extractor]
+                 │                                                                     │
+                 │                                                             [B6: LLM Pipeline]
+                 │                                                                     │
+                 │                                                             [B7: Validator]
                  │
                  ├──→ [B4: Database Layer] (parallel with B2)
                  │
@@ -56,22 +56,46 @@ Each bead is a self-contained, testable unit. Beads can run in parallel where de
 - Legend bar, rule_id monospace labels, connector lines
 - React.memo for performance
 
-### B2: PDF Discovery (Scraper) — READY TO IMPLEMENT
+### B2: PDF Discovery — READY TO IMPLEMENT (UPGRADED with ChatGPT Deep Research)
 - **Depends**: B1, B4
-- Scrape https://www.hioscar.com/clinical-guidelines/medical
-- Find all `<a>` tags with href starting `/medical/cg*`
-- Resolve relative URLs to full `https://www.hioscar.com/medical/cgXXX`
-- UPSERT into policies table: `INSERT ... ON CONFLICT(pdf_url) DO UPDATE`
-- **Research insight**: Use requests + BeautifulSoup, `User-Agent` header, polite delays 1-2s
-- **Grok insight**: If page is JS-loaded, fallback to Selenium; use regex `cg\d+v\d+` for link pattern matching
+- **Source**: `https://www.hioscar.com/clinical-guidelines/medical`
+- **Architecture**: Single-page listing, NO pagination. All guidelines visible in one HTML response.
+- **Sections on page**: "Upcoming Policy Changes", "Medical Guidelines" (main list), "Adopted Guidelines"
+- **Discovery strategy**:
+  1. Parse listing page HTML with requests + BeautifulSoup
+  2. Find all `<a>` tags where visible text is exactly `"PDF"` (not "LINK")
+  3. Each PDF link's `href` points to an **intermediate policy page** (NOT a direct PDF)
+  4. Derive title from nearest `<li>` parent text, strip trailing "PDF"
+  5. Title format: `"Acupuncture (CG013, Ver. 11)"` — parse code/version with tolerant regex (optional)
+- **CRITICAL**: Links do NOT go directly to `.pdf` files. They go to intermediate pages like:
+  - `/medical/cg013v11`, `/medical/cg057v8` (Medical Guidelines)
+  - `/pharmacy/pg193v2`, `/pharmacy/cg059v7` (some CG items under /pharmacy/)
+  - `/medical/adopted/asam` (Adopted Guidelines)
+  - Do NOT assume CG → /medical/ and PG → /pharmacy/. Follow href as ground truth.
+- **Dedup**: Listing page has duplicates (nested + top-level). Dedupe by intermediate URL.
+- **Filter**: Only process entries with "PDF" link text, skip "LINK" entries (external sites).
+- **Store**: UPSERT into policies table with `intermediate_url` as the discovered link
+- **Polite**: 0.5s delay + jitter between requests, browser-like User-Agent, 3 retries with backoff
+- **robots.txt**: `Allow: /`, no Crawl-delay, clinical guideline pages not disallowed
 
-### B3: PDF Downloader — READY TO IMPLEMENT
-- **Depends**: B2
-- Download each PDF to `data/pdfs/` dir
-- Use `tenacity` for retry 3x with exponential backoff (`wait_exponential(min=4, max=10)`)
-- 2s delay between requests for polite scraping
-- Detect content-type (`application/pdf`) to verify actual PDF
-- Record in downloads table (http_status, error, stored_location)
+### B3: PDF Resolver + Downloader — READY TO IMPLEMENT (UPGRADED with ChatGPT Deep Research)
+- **Depends**: B2, B4
+- **Two-step process** (this is the key insight from ChatGPT research):
+  1. **Resolve**: Fetch each intermediate page, parse `__NEXT_DATA__` script tag for real PDF URL
+  2. **Download**: Stream-download the actual PDF from `assets.ctfassets.net`
+- **PDF URL Resolution** (from intermediate page):
+  1. Parse HTML, find `<script id="__NEXT_DATA__">`
+  2. `json.loads()` the script content
+  3. Recursively walk the JSON for strings containing `ctfassets.net`
+  4. Prefer URLs ending in `.pdf`; accept extensionless as fallback
+  5. Regex fallback: scan raw HTML for `https?://assets\.ctfassets\.net/[^\s"']+`
+- **Real PDF URLs** are on Contentful CDN: `https://assets.ctfassets.net/<space_id>/<asset_id>/<hash>/<filename>.pdf`
+- **Download**: Stream with `iter_content(chunk_size=64KB)`, verify `Content-Type: application/pdf`
+- **Sanity check**: Reject files < 200 bytes (likely error pages)
+- **Size variability**: 6 pages (small) to 113 pages (large) — must handle both
+- **Store**: `data/pdfs/` dir, record in downloads table (http_status, error, stored_location)
+- **Rate limiting**: 0.5s delay between requests, 3 retries with exponential backoff
+- **Session**: reuse `requests.Session()` with browser-like headers for connection pooling
 
 ### B5: PDF Text Extractor — READY TO IMPLEMENT
 - **Depends**: B3
@@ -80,46 +104,62 @@ Each bead is a self-contained, testable unit. Beads can run in parallel where de
 - Strip headers/footers
 - **Grok insight**: pdfplumber superior for structured text; PyMuPDF faster for simple extraction
 
-### B6: LLM Structuring Pipeline — READY TO IMPLEMENT (unblocked by Grok research)
+### B6: LLM Structuring Pipeline — READY TO IMPLEMENT (upgraded with all research)
 - **Depends**: B5, B7
 - OpenAI GPT-4o with `response_format={"type": "json_object"}`
 - System prompt: "You are a medical criteria structurer"
 - User prompt: Feed extracted text, request ONLY initial criteria as recursive JSON tree
-- **Initial-only heuristic**: Scan text for keywords ("Initial Criteria", "Initial Approval", "Initial Authorization") via regex `r'Initial\s*(Criteria|Approval)'`; slice text to that section. Fallback: use first criteria-like section after "Medical Necessity" header
-- Process at least 10 guidelines (use `random.sample` from unstructured policies)
+- **Initial-only heuristic** (from ChatGPT + Grok research):
+  - Heading patterns in PDFs:
+    - `"Medical Necessity Criteria for Initial Authorization"`
+    - `"Medical Necessity Criteria for Reauthorization"` (EXCLUDE)
+    - `"Clinical Indications"` → first criteria set = initial
+    - `"Continued Care"` / `"Continuation of Services"` (EXCLUDE)
+  - Regex: `r'(?:Initial|Medical Necessity Criteria for Initial)\s*(Authorization|Approval|Criteria)'`
+  - Strategy: Slice text to initial section, exclude reauth/continuation blocks
+  - Fallback: first complete criteria tree if initial/reauth not explicitly labeled
+- **Criteria formatting in PDFs** (from ChatGPT research):
+  - Numbered lists (1., 2.) with AND/OR logic explicit per line
+  - Nested subcriteria: lettered (a., b.) and roman (i., ii.)
+  - Bullets: ●, ○, ❖ for drug lists
+  - Some policies have multiple indication-specific criteria blocks
+- Process at least 10 guidelines
 - Validate with B7 (Pydantic) before storing
 - Store: extracted_text ref, structured_json, llm_metadata (model + prompt version), validation_error
-- **Grok insight**: Chunk large texts if exceeding token limit; retry with refined prompt on schema failure
+- Chunk large texts if exceeding token limit; retry with refined prompt on schema failure
 
-## Research Findings Applied (Prompt 3 — ChatGPT)
+## Research Findings Applied
 
-### Confirmed Stack
-- FastAPI + SQLAlchemy Core (raw SQL via `text()`) — NOT ORM
-- SQLite + WAL mode (single file, no server, concurrent reads)
-- Vite + React + TypeScript + React Router + Tailwind CSS
-- Custom recursive TreeViewer (no react-d3-tree, no react-arborist)
+### Prompt 1 — ChatGPT Deep Research (Scraping Architecture) — NEW
+**CRITICAL FINDINGS** that changed B2 and B3:
+1. PDF links on listing page → intermediate pages (NOT direct PDFs)
+2. Intermediate pages are Next.js SSR — visible HTML is empty, data in `__NEXT_DATA__`
+3. Real PDFs on `assets.ctfassets.net` (Contentful CDN)
+4. Must parse `__NEXT_DATA__` JSON → recursive walk for `ctfassets.net` URLs
+5. Some CG items live under `/pharmacy/` not `/medical/` — follow href, don't assume
+6. Listing page has duplicates — dedupe by URL
+7. `robots.txt` allows crawling, no Crawl-delay specified
+8. PDF sizes vary from 6 to 113 pages
+9. PDF headings: "Medical Necessity Criteria for Initial Authorization" vs "Reauthorization"
+10. Complete scraper skeleton provided in `research/1chatgpt.md`
 
-### Key Patterns
-- `check_same_thread=False` for SQLite in web server
-- `pool_pre_ping=True` for connection health
-- WAL + busy_timeout=5000 for concurrent access
-- JSON stored as TEXT in SQLite, parsed with `_parse_json_maybe()`
-- CTE with `ROW_NUMBER() OVER (PARTITION BY)` for latest download
-- `createBrowserRouter` with Layout route wrapping pages
+### Prompt 3 — ChatGPT (Stack Architecture)
+- Confirmed: FastAPI + SQLAlchemy Core (raw SQL) + SQLite WAL
+- Confirmed: Vite + React + TS + React Router + Tailwind
+- Confirmed: Custom recursive TreeViewer
 
-### Research Gaps — RESOLVED (Grok research in `research/groksanswer.md`)
-- Scraping: Links are `/medical/cg*` pattern, use BS4 + requests with User-Agent
-- LLM pipeline: Prompt template confirmed, initial-only via keyword regex + text slicing
-- PDF extraction: pdfplumber recommended for layout-aware extraction
-- Validation: jsonschema with recursive `$ref` (we use Pydantic instead — equivalent)
+### Grok Research (`research/groksanswer.md`)
+- pdfplumber for text extraction
+- LLM prompt template for structuring
+- Pydantic for validation (instead of jsonschema)
 
 ## Execution Plan
 
 **Phase 1 — COMPLETE:**
 B1, B4, B7, B8, B9, B10 all done and upgraded with research
 
-**Phase 2 — NEXT (research complete, ready to implement):**
-B2 (Discovery), B3 (Downloader), B5 (Extractor), B6 (LLM Pipeline)
+**Phase 2 — NEXT (all research complete, ready to implement):**
+B2 (Discovery) → B3 (Resolver + Downloader) → B5 (Extractor) → B6 (LLM Pipeline)
 
 **Phase 3 — FINAL:**
 Integration test, README updates, commit

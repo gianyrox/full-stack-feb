@@ -42,11 +42,25 @@ Oscar Medical Guidelines scraper + structured criteria tree explorer. The system
 - `GET /api/policies/:id/tree` — Raw structured JSON tree
 - `GET /api/stats` — Counts: total_policies, downloaded, failed, structured
 
+## Scraping Architecture (from ChatGPT Deep Research)
+
+- **Listing page** (`/clinical-guidelines/medical`): Single HTML page, no pagination
+- **PDF links are NOT direct**: `<a>` tags with text "PDF" → **intermediate pages** (e.g., `/medical/cg013v11`)
+- **Intermediate pages**: Next.js SSR — parse `<script id="__NEXT_DATA__">` JSON for real PDF URL
+- **Real PDF host**: `assets.ctfassets.net` (Contentful CDN)
+- **Resolution**: Recursively walk `__NEXT_DATA__` JSON for `ctfassets.net` URLs, prefer `.pdf` suffix
+- **URL prefixes vary**: `/medical/cg*`, `/pharmacy/pg*`, `/pharmacy/cg*`, `/medical/adopted/*` — follow href
+- **Dedup by intermediate URL** (listing has duplicates)
+- **Filter**: Only "PDF" link text, skip "LINK" entries
+- **Complete scraper skeleton**: `research/1chatgpt.md`
+
 ## Critical Constraints
 
 - **Initial criteria only**: Extract only the Initial tree (not Continuation/Repair/Revision)
+- **Initial heading patterns**: "Medical Necessity Criteria for Initial Authorization", "Clinical Indications" (first block)
+- **Exclude patterns**: "Reauthorization", "Continued Care", "Continuation of Services"
 - **Idempotent reruns**: `pdf_url` UNIQUE + UPSERT patterns
-- **Polite scraping**: 1-2s delays, retry 3x with exponential backoff
+- **Polite scraping**: 0.5s delay + jitter, retry 3x with backoff, browser-like User-Agent
 - **Schema validation**: Pydantic recursive model validation before DB insert
 
 ## Commands
