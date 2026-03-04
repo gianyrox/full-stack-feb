@@ -1,7 +1,5 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Project Overview
 
 Oscar Medical Guidelines scraper + structured criteria tree explorer. The system:
@@ -10,28 +8,57 @@ Oscar Medical Guidelines scraper + structured criteria tree explorer. The system
 3. Persists scraped policy metadata and structured trees in a database
 4. Provides a UI to browse policies and navigate/render criteria trees
 
-## Key Reference Files
+## Architecture (confirmed by research)
 
-- `oscar.json` — Example structured output format. Recursive tree: top-level has `title`, `insurance_name`, `rules`. Each node has `rule_id`, `rule_text`, optional `operator` (AND/OR), optional `rules` array of children.
-- `.env.example` — Requires `OPENAI_API_KEY`
-- `README.md` — Full specification with data model requirements, acceptance criteria, and deliverables
+- **Backend**: FastAPI + SQLAlchemy Core (raw SQL via `text()`, NOT ORM) + SQLite (WAL mode)
+- **Frontend**: Vite + React + TypeScript + React Router + Tailwind CSS
+- **Tree rendering**: Custom recursive component (no third-party library)
+- **DB**: SQLite at `data/app.db`, auto-migrated on startup from `backend/sql/sqlite_schema.sql`
 
-## Data Model (Required Tables/Collections)
+## Key Files
 
-Three entities must be stored:
-1. **Policies** — all discovered PDFs (title, pdf_url unique, source_page_url, discovered_at)
-2. **Downloads** — per-policy download outcome (stored_location, http_status, error)
-3. **Structured policies** — at least 10 (extracted_text, structured_json matching oscar.json schema, llm_metadata, validation_error)
+- `oscar.json` — Target JSON structure. Recursive: `{title, insurance_name, rules: {rule_id, rule_text, operator?, rules?[]}}`
+- `backend/main.py` — FastAPI app with 4 endpoints (policies list, detail, tree, stats) using raw SQL with CTEs
+- `backend/sql/sqlite_schema.sql` — Schema DDL (3 tables + indexes)
+- `backend/migrate.py` — Runs schema SQL at startup
+- `backend/validator.py` — Pydantic recursive validation of LLM output
+- `backend/interfaces.py` — Protocol contracts for each pipeline bead
+- `frontend/src/components/TreeViewer.tsx` — Recursive tree with expand/collapse, AND/OR badges
+- `BEADS.md` — Work unit tracker with status and dependencies
+
+## Database Patterns
+
+- SQLite pragmas: `foreign_keys=ON`, `journal_mode=WAL`, `busy_timeout=5000`
+- `check_same_thread=False` for web server threading
+- Policy UPSERT: `INSERT ... ON CONFLICT(pdf_url) DO UPDATE`
+- Structured UPSERT: `INSERT ... ON CONFLICT(policy_id) DO UPDATE`
+- Latest download: CTE with `ROW_NUMBER() OVER (PARTITION BY policy_id ORDER BY downloaded_at DESC)`
+- JSON stored as TEXT, parsed with `_parse_json_maybe()`
+
+## API Endpoints
+
+- `GET /api/policies` — List all with download_status + has_structured_tree
+- `GET /api/policies/:id` — Detail with latest download + structured data
+- `GET /api/policies/:id/tree` — Raw structured JSON tree
+- `GET /api/stats` — Counts: total_policies, downloaded, failed, structured
 
 ## Critical Constraints
 
-- **Initial criteria only**: When a guideline has both Initial and Continuation criteria, extract only the Initial tree. Document the selection logic.
-- **Idempotent reruns**: Discovery and download must not duplicate records on re-run (pdf_url uniqueness).
-- **Polite scraping**: Include throttling/rate-limiting and retries.
-- **Schema validation**: LLM output must be validated against the oscar.json recursive node shape before storing.
+- **Initial criteria only**: Extract only the Initial tree (not Continuation/Repair/Revision)
+- **Idempotent reruns**: `pdf_url` UNIQUE + UPSERT patterns
+- **Polite scraping**: 1-2s delays, retry 3x with exponential backoff
+- **Schema validation**: Pydantic recursive model validation before DB insert
 
-## UI Requirements
+## Commands
 
-- Policy list with title + PDF link, indicating which have structured trees
-- Detail view: policy title, links, expandable/collapsible criteria tree
-- AND/OR operator nodes must be visually distinct from leaf criteria nodes
+```bash
+# Backend
+cd backend && pip install -r requirements.txt
+uvicorn backend.main:app --reload --port 8000
+
+# Frontend
+cd frontend && npm install && npm run dev
+
+# Validate oscar.json
+python backend/validator.py
+```
