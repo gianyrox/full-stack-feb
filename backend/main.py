@@ -285,6 +285,20 @@ def get_stats(conn: Connection = Depends(get_conn)) -> StatsResponse:
         total_structured=int(row["total_structured"] or 0),
     )
 
+@app.post("/api/run-scraper")
+def run_scraper():
+    """Trigger the B2+B3 scraper pipeline (discover + resolve + download)."""
+    from backend.scraper import run_full_pipeline
+    return run_full_pipeline()
+
+
+@app.post("/api/run-structurer")
+def run_structurer():
+    """Trigger the B5+B6 structuring pipeline (extract text + LLM)."""
+    from backend.structurer import run_structuring
+    return run_structuring(limit=10)
+
+
 @app.on_event("startup")
 def on_startup():
     from backend.migrate import run_migrations

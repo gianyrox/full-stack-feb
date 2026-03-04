@@ -40,7 +40,7 @@ def extract_text(pdf_path: str | Path) -> ExtractionResult:
 
         for page_num in range(len(doc)):
             page = doc[page_num]
-            page_text = page.get_text("text")
+            page_text = page.get_text("text", sort=True)
 
             # Strip common headers/footers (page numbers, copyright lines)
             lines = page_text.split("\n")
@@ -86,58 +86,102 @@ def _strip_headers_footers(lines: list[str], page_num: int, total_pages: int) ->
     return filtered
 
 
-def extract_initial_section(full_text: str) -> str:
+@dataclass
+class SectionResult:
+    text: str
+    confidence: float
+    logic: str
+
+
+# Patterns indicating the start of the initial medical necessity criteria
+_START_PATTERNS = [
+    re.compile(r"(?i)initial\s+(criteria|authorization|approval)"),
+    re.compile(r"(?i)criteria\s+for\s+medically\s+necessary"),
+    re.compile(r"(?i)medical\s+necessity\s+criteria"),
+    re.compile(r"(?i)conditions\s+for\s+coverage"),
+    re.compile(r"(?i)clinical\s+indications"),
+]
+
+# Patterns indicating the start of a non-initial section (stopping points)
+_END_PATTERNS = [
+    re.compile(r"(?i)continuation\s+(criteria|therapy|treatment|of\s+therapy)"),
+    re.compile(r"(?i)re-?authorization\s+criteria"),
+    re.compile(r"(?i)renewal\s+criteria"),
+    re.compile(r"(?i)repair[/,]\s*revision"),
+    re.compile(r"(?i)conversion\s+criteria"),
+    re.compile(r"(?i)removal\s+criteria"),
+    re.compile(r"(?i)experimental\s*[/&]\s*investigational"),
+    re.compile(r"(?i)relative\s+contraindications"),
+    re.compile(r"(?i)applicable\s+billing\s+codes"),
+    re.compile(r"(?i)HCPCS\s+(&|and)\s+CPT\s+codes"),
+    re.compile(r"(?i)procedures?\s*(&|and)\s*length\s+of\s+stay"),
+    re.compile(r"(?i)Medical Necessity Criteria for Reauthorization"),
+]
+
+
+def extract_initial_section(full_text: str) -> SectionResult:
     """Extract only the 'Initial' criteria section from full PDF text.
 
-    Looks for common heading patterns and slices text to just that section.
-    Returns full text as fallback if no clear initial section found.
+    Uses a line-by-line state machine approach with confidence scoring.
+    Returns SectionResult with text, confidence (0.0-1.0), and extraction logic.
     """
-    # Patterns that mark the START of initial criteria
-    initial_patterns = [
-        r"Medical Necessity Criteria for Initial Authorization",
-        r"Initial Authorization Criteria",
-        r"Initial Approval Criteria",
-        r"Initial Criteria",
-        r"Clinical Indications",
-    ]
+    lines = full_text.split("\n")
+    start_idx = -1
+    end_idx = -1
+    confidence = 0.0
+    logic = "No boundaries detected."
+    in_criteria = False
 
-    # Patterns that mark the END (start of non-initial sections)
-    end_patterns = [
-        r"Medical Necessity Criteria for Reauthorization",
-        r"Reauthorization Criteria",
-        r"Continued?\s*Care",
-        r"Continuation of Services",
-        r"Renewal Criteria",
-        r"Re-?authorization",
-    ]
+    for i, line in enumerate(lines):
+        clean = line.strip()
+        if not clean:
+            continue
 
-    # Find the initial section start
-    initial_start = None
-    for pattern in initial_patterns:
-        match = re.search(pattern, full_text, re.IGNORECASE)
-        if match:
-            initial_start = match.start()
-            break
+        if not in_criteria:
+            for pattern in _START_PATTERNS:
+                if pattern.search(clean):
+                    start_idx = i
+                    in_criteria = True
+                    if "initial" in clean.lower():
+                        confidence = 0.95
+                        logic = f"Found explicit 'Initial' start at line {i}."
+                    else:
+                        confidence = 0.85
+                        logic = f"Found generic criteria start at line {i}."
+                    break
+        else:
+            for pattern in _END_PATTERNS:
+                if pattern.search(clean):
+                    end_idx = i
+                    logic += f" End marker '{clean[:40]}...' at line {i}."
+                    break
 
-    if initial_start is None:
-        # No explicit initial section — return full text for LLM to handle
-        logger.info("No explicit initial section found, returning full text")
-        return full_text
+            # Heuristic: uppercase block as section break
+            if end_idx == -1 and clean.isupper() and len(clean) > 10:
+                if any(kw in clean for kw in ("BACKGROUND", "SUMMARY", "REFERENCES")):
+                    end_idx = i
+                    logic += f" Uppercase block end at line {i}."
 
-    # Find the end of the initial section
-    text_after_start = full_text[initial_start:]
-    initial_end = len(full_text)
+            if end_idx != -1:
+                break
 
-    for pattern in end_patterns:
-        match = re.search(pattern, text_after_start[100:], re.IGNORECASE)  # skip the heading itself
-        if match:
-            candidate_end = initial_start + 100 + match.start()
-            if candidate_end < initial_end:
-                initial_end = candidate_end
+    if start_idx == -1:
+        return SectionResult(
+            text=full_text,
+            confidence=0.30,
+            logic="Fallback: No start boundary found. Returning full text.",
+        )
 
-    section = full_text[initial_start:initial_end].strip()
-    logger.info("Extracted initial section: %d chars (from %d total)", len(section), len(full_text))
-    return section
+    if end_idx == -1:
+        end_idx = len(lines)
+        confidence -= 0.15
+        logic += " Reached EOF without explicit end marker."
+
+    section = "\n".join(lines[start_idx:end_idx])
+    logger.info(
+        "Extracted initial section: %d chars (confidence=%.2f)", len(section), confidence
+    )
+    return SectionResult(text=section, confidence=confidence, logic=logic)
 
 
 if __name__ == "__main__":
@@ -158,6 +202,7 @@ if __name__ == "__main__":
         print(result.text[:500])
         print("---")
         # Try initial section extraction
-        initial = extract_initial_section(result.text)
-        print(f"\nInitial section: {len(initial)} chars")
-        print(initial[:500])
+        section = extract_initial_section(result.text)
+        print(f"\nInitial section: {len(section.text)} chars (confidence={section.confidence:.2f})")
+        print(f"Logic: {section.logic}")
+        print(section.text[:500])

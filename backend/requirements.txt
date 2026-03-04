@@ -10,3 +10,5 @@ jsonschema
 requests
 beautifulsoup4
 pdfplumber
+fast-json-repair
+tenacity

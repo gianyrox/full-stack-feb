@@ -24,7 +24,8 @@ Oscar Medical Guidelines scraper + structured criteria tree explorer. The system
 - `backend/validator.py` — Pydantic recursive validation of LLM output
 - `backend/interfaces.py` — Protocol contracts for each pipeline bead
 - `frontend/src/components/TreeViewer.tsx` — Recursive tree with expand/collapse, AND/OR badges
-- `BEADS.md` — Work unit tracker with status and dependencies
+- `AGENTS.md` — Agent instructions for bd workflow
+- `BEADS.md` — Legacy reference (details per bead). Live tracking now in `bd` database
 
 ## Database Patterns
 
@@ -63,6 +64,73 @@ Oscar Medical Guidelines scraper + structured criteria tree explorer. The system
 - **Polite scraping**: 0.5s delay + jitter, retry 3x with backoff, browser-like User-Agent
 - **Schema validation**: Pydantic recursive model validation before DB insert
 
+## Issue Tracking — bd (beads)
+
+This project uses **bd** (Steve Yegge's Beads) for ALL task tracking. Backed by Dolt (version-controlled SQL). See AGENTS.md for full agent workflow.
+
+```bash
+bd ready              # Find unblocked work — START HERE every session
+bd show <id>          # View issue details + description
+bd update <id> --claim  # Claim work atomically
+bd close <id> --reason "Done"  # Complete work
+bd list               # List all open issues
+bd graph --all        # Visualize dependency chain
+bd create "title" -d "context" -t feature -p 1  # Create new issue
+```
+
+**Rules:**
+- Do NOT use markdown TODOs, TASKS.md, or competing task files — bd is the single source of truth
+- Always `bd ready` before starting work to find unblocked issues
+- Create discovered issues with `bd create "title" -d "context" --deps discovered-from:<parent-id>`
+- Include bead ID in commit messages: `git commit -m "Add scraper (full-stack-feb-mw1)"`
+- When closing a bead, update bd BEFORE merging to main: `bd close <id> --reason "Completed"`
+- Never use `bd edit` (interactive) — use `bd update <id> --description "text"` instead
+
+## Git Workflow (parallel-safe, beads-integrated)
+
+**Multiple Claude sessions may run simultaneously on different branches.**
+
+### Session Start
+```bash
+cd /home/gian/Projects/full-stack-feb/full-stack-feb
+git checkout main && git pull origin main
+git checkout -b <descriptive-branch-name>   # e.g. scraper, llm-pipeline, ui-tree
+bd ready                                     # Find what to work on
+bd update <id> --claim                       # Claim the bead
+```
+
+### While Working
+- **Commit + push after EVERY meaningful change** (new file, function complete, bug fix)
+- `git add <files> && git commit -m "description (bead-id)" && git push origin <branch>`
+- Aim for a commit+push every 5-10 minutes — unpushed work is LOST if session dies
+
+### Before Merge to Main (MANDATORY)
+```bash
+# TypeScript type-check MUST pass before any merge to main
+npx tsc --noEmit
+```
+If `tsc` fails, fix ALL type errors on your feature branch before proceeding.
+
+### Merge to Main (end of session)
+```bash
+git add -A && git commit -m "final changes (bead-id)" && git push origin <branch>
+bd close <id> --reason "Completed"           # Close the bead FIRST
+git checkout main && git pull origin main     # Get latest
+git checkout <branch>                         # Back to feature branch
+git merge main                               # Merge main INTO branch (resolve conflicts here)
+npx tsc --noEmit                             # Type-check MUST pass
+git checkout main && git merge <branch>       # Fast-forward merge to main
+git push origin main
+git push origin --delete <branch> && git branch -d <branch>
+```
+
+### Critical Rules
+- NEVER `git push --force` to main
+- NEVER merge to main without `npx tsc --noEmit` passing first
+- ALWAYS resolve conflicts on the feature branch, not on main
+- If `git push origin main` fails (another session pushed), repeat the merge steps
+- Before merging, check `git log origin/main --oneline -5` for other sessions' work
+
 ## Commands
 
 ```bash
@@ -72,6 +140,9 @@ uvicorn backend.main:app --reload --port 8000
 
 # Frontend
 cd frontend && npm install && npm run dev
+
+# Type-check (required before merge)
+cd frontend && npx tsc --noEmit
 
 # Validate oscar.json
 python backend/validator.py

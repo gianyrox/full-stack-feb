@@ -16,7 +16,7 @@ from typing import Optional
 from openai import OpenAI
 from sqlalchemy import create_engine, event, text as sql_text
 
-from backend.extractor import extract_text, extract_initial_section
+from backend.extractor import ExtractionResult, SectionResult, extract_text, extract_initial_section
 from backend.validator import validate_structured_json
 
 logger = logging.getLogger(__name__)
@@ -65,27 +65,98 @@ Guideline text:
 Return ONLY the JSON object, no markdown formatting, no explanation."""
 
 
-def structure_text(text: str, title_hint: str = "") -> dict:
-    """Send text to OpenAI and get structured JSON back."""
+def _parse_and_repair(raw: str) -> dict:
+    """Parse LLM output, repairing malformed JSON if needed."""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # Strip markdown fencing
+        cleaned = raw.strip()
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:]
+        if cleaned.startswith("```"):
+            cleaned = cleaned[3:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        cleaned = cleaned.strip()
+
+        # Try again after stripping
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            pass
+
+        # Try fast-json-repair if available
+        try:
+            from fast_json_repair import repair_json
+            repaired = repair_json(cleaned)
+            return json.loads(repaired)
+        except (ImportError, Exception):
+            pass
+
+        # Try json_repair as fallback
+        try:
+            import json_repair
+            return json_repair.loads(cleaned)
+        except (ImportError, Exception):
+            pass
+
+        raise ValueError(f"Irreparable JSON: {raw[:200]}...")
+
+
+def _clean_leaf_nodes(node: dict) -> None:
+    """Remove hallucinated operators from leaf nodes."""
+    if "rules" not in node or not node.get("rules"):
+        node.pop("operator", None)
+        node.pop("rules", None)
+    else:
+        for child in node["rules"]:
+            _clean_leaf_nodes(child)
+
+
+def structure_text(text: str, title_hint: str = "", max_attempts: int = 3) -> dict:
+    """Send text to OpenAI and get structured JSON back.
+
+    Includes semantic retry: on validation failure, feeds error back to LLM.
+    """
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
     user_prompt = USER_PROMPT_TEMPLATE.format(text=text[:12000])  # Token limit safety
 
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.1,
-        max_tokens=4000,
-    )
+    for attempt in range(max_attempts):
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.1,
+            max_tokens=4096,
+        )
 
-    content = response.choices[0].message.content
-    result = json.loads(content)
+        content = response.choices[0].message.content
+        result = _parse_and_repair(content)
 
-    logger.info("LLM returned structured JSON with title: %s", result.get("title", "?"))
+        # Clean leaf nodes
+        if "rules" in result:
+            _clean_leaf_nodes(result["rules"])
+
+        # Validate
+        is_valid, error = validate_structured_json(result)
+        if is_valid and (error is None or error.startswith("Warnings:")):
+            logger.info("LLM returned valid JSON (attempt %d): %s", attempt + 1, result.get("title", "?"))
+            return result
+
+        # Semantic retry: feed error back
+        logger.warning("Attempt %d validation failed: %s", attempt + 1, error)
+        if "continuation" in (error or "").lower():
+            user_prompt += "\n\nCRITICAL ERROR: You extracted Continuation criteria. ONLY extract the INITIAL criteria."
+        else:
+            user_prompt += f"\n\nERROR IN PREVIOUS OUTPUT: {error}\nPlease fix the JSON structure."
+
+    # Return last result even if imperfect
+    logger.warning("All %d attempts exhausted, returning last result", max_attempts)
     return result
 
 
@@ -162,7 +233,8 @@ def run_structuring(limit: int = 10) -> dict:
             extraction = extract_text(pdf_path)
             if extraction.error:
                 raise RuntimeError(f"Text extraction failed: {extraction.error}")
-            initial_text = extract_initial_section(extraction.text)
+            section = extract_initial_section(extraction.text)
+            initial_text = section.text
 
             # Structure with LLM
             result = structure_text(initial_text, title_hint=title)
