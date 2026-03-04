@@ -65,7 +65,7 @@ Each bead is a self-contained, testable unit. Beads can run in parallel where de
 - Legend bar, rule_id monospace labels, connector lines
 - React.memo for performance
 
-### B2: PDF Discovery — READY TO IMPLEMENT (UPGRADED with ChatGPT Deep Research)
+### B2: PDF Discovery — DONE (implemented in `backend/scraper.py`)
 - **Depends**: B1, B4
 - **Source**: `https://www.hioscar.com/clinical-guidelines/medical`
 - **Architecture**: Single-page listing, NO pagination. All guidelines visible in one HTML response.
@@ -87,7 +87,7 @@ Each bead is a self-contained, testable unit. Beads can run in parallel where de
 - **Polite**: 0.5s delay + jitter between requests, browser-like User-Agent, 3 retries with backoff
 - **robots.txt**: `Allow: /`, no Crawl-delay, clinical guideline pages not disallowed
 
-### B3: PDF Resolver + Downloader — READY TO IMPLEMENT (UPGRADED with ChatGPT Deep Research)
+### B3: PDF Resolver + Downloader — DONE (implemented in `backend/scraper.py`)
 - **Depends**: B2, B4
 - **Two-step process** (this is the key insight from ChatGPT research):
   1. **Resolve**: Fetch each intermediate page, parse `__NEXT_DATA__` script tag for real PDF URL
@@ -106,7 +106,7 @@ Each bead is a self-contained, testable unit. Beads can run in parallel where de
 - **Rate limiting**: 0.5s delay between requests, 3 retries with exponential backoff
 - **Session**: reuse `requests.Session()` with browser-like headers for connection pooling
 
-### B5: PDF Text Extractor — READY TO IMPLEMENT (upgraded with Gemini research)
+### B5: PDF Text Extractor — DONE (implemented in `backend/extractor.py`)
 - **Depends**: B3
 - **DECISION: Use PyMuPDF (fitz)** — Gemini's comparative analysis is definitive:
   - Flawless Unicode (≥, ≤, ™) — critical for medical thresholds like "BMI ≥ 40"
@@ -118,7 +118,7 @@ Each bead is a self-contained, testable unit. Beads can run in parallel where de
 - Strip headers/footers
 - **Grok suggested pdfplumber** but Gemini's analysis shows PyMuPDF better for hierarchical text (pdfplumber better for tables/financial docs)
 
-### B5.5: Initial-Only Section Extractor — NEW (from Gemini research)
+### B5.5: Initial-Only Section Extractor — DONE (in `backend/extractor.py`)
 - **Depends**: B5
 - **Purpose**: Pre-slice PDF text to only the initial criteria BEFORE sending to LLM
 - **Implementation**: `extract_initial_criteria(full_text) → (text, confidence, logic_log)`
