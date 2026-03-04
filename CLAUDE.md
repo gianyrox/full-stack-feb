@@ -22,6 +22,9 @@ Oscar Medical Guidelines scraper + structured criteria tree explorer. The system
 - `backend/sql/sqlite_schema.sql` — Schema DDL (3 tables + indexes)
 - `backend/migrate.py` — Runs schema SQL at startup
 - `backend/validator.py` — Pydantic recursive validation of LLM output
+- `backend/scraper.py` — B2+B3: Discovery + PDF resolver + downloader (requests + BS4 + __NEXT_DATA__)
+- `backend/extractor.py` — B5+B5.5: PDF text extraction (PyMuPDF) + initial section extraction
+- `backend/structurer.py` — B6: LLM structuring pipeline (OpenAI GPT-4o + JSON mode)
 - `backend/interfaces.py` — Protocol contracts for each pipeline bead
 - `frontend/src/components/TreeViewer.tsx` — Recursive tree with expand/collapse, AND/OR badges
 - `AGENTS.md` — Agent instructions for bd workflow
@@ -42,6 +45,8 @@ Oscar Medical Guidelines scraper + structured criteria tree explorer. The system
 - `GET /api/policies/:id` — Detail with latest download + structured data
 - `GET /api/policies/:id/tree` — Raw structured JSON tree
 - `GET /api/stats` — Counts: total_policies, downloaded, failed, structured
+- `POST /api/run-scraper` — Trigger B2+B3 pipeline (discover + resolve + download all PDFs)
+- `POST /api/run-structurer` — Trigger B5+B6 pipeline (extract text + LLM structuring, limit=10)
 
 ## Scraping Architecture (from ChatGPT Deep Research)
 
